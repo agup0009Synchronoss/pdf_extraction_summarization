@@ -1,0 +1,28 @@
+spec:
+  template:
+    spec:
+      tolerations:
+      - key: nvidia-g6e
+        operator: Equal
+        value: "true"
+        effect: NoSchedule
+      - key: nvidia-g6e2x
+        operator: Equal
+        value: "true"
+        effect: NoSchedule
+      - key: nvidia-jupyter
+        operator: Equal
+        value: "true"
+        effect: NoSchedule
+      - key: nvidia-ram
+        operator: Equal
+        value: "true"
+        effect: NoSchedule
+      - key: nvidia
+        operator: Equal
+        value: "true"
+        effect: NoSchedule
+
+
+
+

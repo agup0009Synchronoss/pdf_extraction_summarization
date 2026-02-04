@@ -1,0 +1,22 @@
+install kubectl in you terminal and download this file
+ 
+export KUBECONFIG=:/Users/prjr0001/Documents/K8/K8Conf/k8s-sip-eks-mcap-use-dev-default-conf
+ 
+then add this to you bashrc or zshrc
+ 
+and source it 
+ 
+below are the cmds to access the env 
+ 
+export KUBECONFIG=/Users/prjr0001/Documents/K8/K8Conf/k8s-sip-eks-mcap-use-dev-default-conf;
+
+kubectl config use-context sip-eks-mcap-use-dev-default-eks_sip-eks-mcap-use-dev;
+
+kubectl get namespace;
+ 
+after this type the cmds Vishnu and Jeff gave
+ 
+kubectl -n ml-ollama edit cronjob scale-up-monthly-ollama-api
+kubectl -n ml-ollama edit cronjob scale-down-monthly-ollama-api
+ 
+ 
