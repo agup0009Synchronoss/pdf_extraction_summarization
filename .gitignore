@@ -1,0 +1,235 @@
+# PDF Extraction Pipeline - .gitignore
+
+# ==============================================================================
+# Python
+# ==============================================================================
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual Environments
+venv/
+env/
+ENV/
+.venv/
+.env/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Distribution / packaging
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+
+# ==============================================================================
+# Machine Learning / AI Model Caches
+# ==============================================================================
+# Hugging Face cache
+hf_cache/
+.huggingface/
+transformers_cache/
+torch_cache/
+
+# Model weights and checkpoints (unless explicitly tracked)
+*.pt
+*.pth
+*.bin
+*.onnx
+*.h5
+*.pkl
+*.pickle
+
+# EasyOCR model cache
+.EasyOCR/
+
+# ==============================================================================
+# Generated Output Files
+# ==============================================================================
+# PDF extraction outputs
+output/
+*.json
+!requirements.txt
+
+# Processed PDFs and temporary files
+*_dual.json
+*_prompt_response.json
+llama_responses.json
+
+# Exclude sample outputs but allow them to be tracked if needed
+# You can add exceptions for specific files like:
+# !output/example_output.json
+
+# ==============================================================================
+# Sensitive Information
+# ==============================================================================
+# Environment variables and secrets
+.env
+.env.local
+.env.*.local
+*.key
+*.pem
+*.crt
+secrets/
+config/secrets/
+
+# Kubernetes config files with credentials
+# (Keep the non-sensitive templates)
+k8s-config
+k8s-sip-eks-mcap-use-dev-default-conf
+
+# API keys and tokens
+**/api_keys.txt
+**/tokens.txt
+
+# ==============================================================================
+# PDF Files (Mostly Generated/Temporary)
+# ==============================================================================
+# Ignore PDFs in output directory
+output/*.pdf
+
+# Ignore temporary/test PDFs in root
+/*.pdf
+
+# Keep reference documentation PDFs in docs/ 
+# (they're checked in for reference)
+# !pdf_extraction/docs/*.pdf
+
+# ==============================================================================
+# IDE / Editor Files
+# ==============================================================================
+# VSCode
+.vscode/
+*.code-workspace
+
+# PyCharm
+.idea/
+*.iml
+*.iws
+.idea_modules/
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# Vim
+*.swp
+*.swo
+*~
+.*.sw?
+
+# Emacs
+*~
+\#*\#
+.\#*
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+*.ipynb
+
+# ==============================================================================
+# Operating System Files
+# ==============================================================================
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Linux
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+
+# ==============================================================================
+# Logs and Temporary Files
+# ==============================================================================
+*.log
+logs/
+*.tmp
+*.temp
+*.bak
+*.backup
+
+# Temporary directories
+tmp/
+temp/
+.tmp/
+
+# ==============================================================================
+# Documentation Build Files
+# ==============================================================================
+docs/_build/
+docs/.doctrees/
+site/
+
+# Legacy/redundant documentation files
+PDF_EXTRACT_CODEBASE_SUMMARY.md
+**/PDF_EXTRACT_CODEBASE_SUMMARY.md
+
+# ==============================================================================
+# Testing
+# ==============================================================================
+.tox/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ==============================================================================
+# Miscellaneous
+# ==============================================================================
+# Local development files
+scratch/
+playground/
+experiments/
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Compressed files
+*.zip
+*.tar.gz
+*.rar
+*.7z
