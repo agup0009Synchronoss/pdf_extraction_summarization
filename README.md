@@ -5,11 +5,13 @@ A comprehensive PDF processing system that extracts text and images from PDF doc
 ## 🌟 Features
 
 ### Core Capabilities
-- **Multi-Method PDF Extraction**: Combines Docling, pikepdf, and EasyOCR for robust text extraction
+- **Multi-Method PDF Extraction**: Combines Docling, pikepdf for robust text and image extraction
 - **Image Processing**: Extracts and captions images using BLIP (Salesforce's image captioning model)
+- **Image OCR**: Extracts text from images using PaddleOCR (with EasyOCR fallback)
+- **Smart Image Filtering**: Page-relative and absolute size thresholds to focus on meaningful images
 - **LLM Analysis**: Integrates with Ollama/LLaMA API for intelligent document classification
 - **Document Classification**: Automatically categorizes documents into 20+ types (invoice, resume, scientific paper, etc.)
-- **Web Interface**: Interactive Gradio UI for uploading and processing multiple PDFs
+- **Web Interface**: Interactive Gradio UI with OCR controls for uploading and processing multiple PDFs
 - **Batch Processing**: Handle multiple documents with session-based caching
 - **Kubernetes Integration**: Production-ready deployment with auto-scaling via cron jobs
 
@@ -28,13 +30,24 @@ The system can classify documents into:
 PDF Input → Docling Extraction → Text Cleaning → JSON Generation
                 ↓
         Image Extraction (pikepdf)
+        ├─ Page-relative size filtering
+        └─ Absolute size filtering
                 ↓
-        Image Captioning (BLIP)
+        Parallel Processing:
+        ├─ Image Captioning (BLIP)
+        └─ Text Extraction (PaddleOCR/EasyOCR)
+                ↓
+        Combined Image Data (caption + OCR text)
                 ↓
         LLM Processing (Ollama/LLaMA)
                 ↓
         Classification + Summary → Structured JSON Output
 ```
+
+**OCR Trigger**: Image OCR is performed when:
+- Document has fewer than `MIN_WORDS` (default: 200) extracted by Docling
+- Images meet both absolute (`MIN_IMAGE_AREA_PIXELS`) and relative (`MIN_IMAGE_AREA_PERCENT`) size thresholds
+- OCR is enabled in configuration or UI
 
 ## 📋 Prerequisites
 
@@ -90,6 +103,13 @@ python pdf_extraction/gradio_app.py --share
 ```
 Then open http://localhost:7861 in your browser.
 
+**Using OCR in the Web UI:**
+1. Click "⚙️ Extraction Options" to expand OCR settings
+2. Check "Enable Image OCR" to extract text from images
+3. Select OCR language (English, Chinese, French, German, Spanish, etc.)
+4. Upload PDF(s) - OCR will be applied to images automatically
+5. Results show both visual descriptions (BLIP) and extracted text (OCR)
+
 #### Command Line Processing
 ```bash
 # Process a single PDF
@@ -137,12 +157,25 @@ pdf_extraction/
 ## 🔧 Configuration
 
 ### PDF Extraction Settings
-Edit constants in `pdf_extractor.py`:
+Edit settings in `pdf_extraction/config.py`:
 ```python
-MIN_WORDS = 200      # If text < threshold, extract images too
-MAX_IMAGES = 5       # Maximum images to extract per PDF
-MIN_AREA = 50_000    # Minimum image size (width × height)
+# Text extraction
+MIN_WORDS = 200                    # If text < threshold, extract images too
+MAX_PROMPT_WORDS = 1000            # Max words in LLM prompt
+
+# Image extraction
+MAX_IMAGES = 5                     # Maximum images to extract per PDF
+MIN_IMAGE_AREA_PIXELS = 50_000     # Absolute minimum (pixels)
+MIN_IMAGE_AREA_PERCENT = 0.15      # Minimum 15% of page area
+
+# OCR settings
+ENABLE_IMAGE_OCR = True            # Enable/disable OCR
+OCR_ENGINE = "paddleocr"           # OCR engine to use
+OCR_LANGUAGES = ["en"]             # OCR language(s)
+MAX_OCR_DIMENSION = 2000           # Max image dimension for OCR (memory safety)
 ```
+
+**Configuration Overrides**: The Gradio UI allows per-session overrides. CLI uses defaults from `config.py`.
 
 ### LLM API Settings
 Edit `call_llama_api.py`:
@@ -211,9 +244,16 @@ python pdf_extraction/pdf_pipeline.py /path/to/pdfs/ output/
       "element_id": "image_1",
       "element_type": "image",
       "caption": "Image description...",
+      "ocr_text": "Text extracted from image...",
       "page_number": 2,
       "order": 2,
-      "image_224_jpeg_base64": "..."
+      "image_224_jpeg_base64": "...",
+      "metadata": {
+        "image_width": 800,
+        "image_height": 600,
+        "page_area_percentage": 45.2,
+        "ocr_engine": "paddleocr"
+      }
     }
   ]
 }
@@ -281,7 +321,8 @@ The system includes SSL bypass patches for corporate proxies and firewalls:
 ## 🛠️ Dependencies
 
 ### Core Libraries
-- **PDF Processing**: pikepdf, docling, easyocr
+- **PDF Processing**: pikepdf, docling
+- **OCR**: paddleocr (primary), easyocr (fallback), paddlepaddle
 - **ML/AI**: torch, transformers (BLIP model)
 - **Web Framework**: gradio
 - **HTTP Client**: requests, urllib3
@@ -289,6 +330,8 @@ The system includes SSL bypass patches for corporate proxies and firewalls:
 - **Progress Tracking**: tqdm
 
 See `requirements.txt` for exact versions.
+
+**Note**: PaddleOCR and paddlepaddle are large dependencies (~400MB). First run downloads OCR models (~50MB). Subsequent runs use cached models.
 
 ## 🐛 Troubleshooting
 
@@ -314,8 +357,38 @@ echo $LLAMA_API_KEY
 
 **Problem**: Out of memory during image processing
 ```python
-# Reduce MAX_IMAGES in pdf_extractor.py
-MAX_IMAGES = 2  # Instead of 5
+# In config.py, reduce MAX_IMAGES or MAX_OCR_DIMENSION
+MAX_IMAGES = 2              # Process fewer images
+MAX_OCR_DIMENSION = 1500    # Resize larger images before OCR
+```
+
+**Problem**: PaddleOCR not installing or failing
+```bash
+# Try EasyOCR as fallback (already in requirements)
+# In config.py:
+OCR_ENGINE = "easyocr"
+
+# Or install PaddleOCR manually
+pip install paddleocr paddlepaddle --upgrade
+```
+
+**Problem**: OCR producing poor results
+```python
+# In Gradio UI or config.py:
+# 1. Ensure correct language is selected
+OCR_LANGUAGES = ["en"]  # or "ch", "fr", etc.
+
+# 2. Check image quality - OCR works best on:
+#    - High resolution images (DPI > 150)
+#    - Clear, high-contrast text
+#    - Non-rotated, non-skewed images
+```
+
+**Problem**: OCR is slow
+```bash
+# PaddleOCR: First run downloads models (~50MB)
+# Subsequent runs use cached models and are much faster
+# For GPU acceleration, install paddlepaddle-gpu instead of paddlepaddle
 ```
 
 **Problem**: Kubernetes pods not running
