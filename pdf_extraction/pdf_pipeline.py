@@ -18,11 +18,12 @@ Steps
 from __future__ import annotations
 import datetime, json, logging, textwrap
 from pathlib import Path
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 import requests
 
 from pdf_extractor import extract_pdf_to_json
 from call_llama_api import send_prompt, API_KEY
+from config import get_config
 
 # ---------------------------------------------------------------------------
 logging.basicConfig(level=logging.INFO,
@@ -74,7 +75,18 @@ log = logging.getLogger("pdf_pipeline")
 
 # ---------------------------------------------------------------------------
 # prompt builder (kept here for full in-memory flow)
-def create_prompt(obj: Dict[str, Any]) -> str:
+def create_prompt(obj: Dict[str, Any], config_overrides: Optional[Dict[str, Any]] = None) -> str:
+    """
+    Build LLM prompt from extracted document elements.
+    
+    Args:
+        obj: Extraction JSON object with elements
+        config_overrides: Optional config overrides (for MAX_PROMPT_WORDS)
+        
+    Returns:
+        Formatted prompt string
+    """
+    config = get_config(config_overrides)
     elems = sorted(obj["elements"], key=lambda e: e["order"])
     
     # Build the base prompt
@@ -106,13 +118,30 @@ def create_prompt(obj: Dict[str, Any]) -> str:
     # Collect all content first to count words
     content_parts = []
     total_words = 0
-    max_words = 1000
+    max_words = config.MAX_PROMPT_WORDS
     
     for idx, e in enumerate(elems, 1):
         if e["element_type"] == "text":
             content = f"\nChunk {idx} [text]: {e['content']}"
         else:
-            content = f"\nChunk {idx} [image]: BLIP CAPTION: {e['caption']}"
+            # Combine BLIP caption + OCR text for images
+            parts = [f"\nChunk {idx} [image]:"]
+            
+            # Add caption if available and valid
+            caption = e.get('caption', '')
+            if caption and caption not in ('', '<BLIP unavailable>', '<caption error>'):
+                parts.append(f"Visual Description: {caption}")
+            
+            # Add OCR text if available
+            ocr_text = e.get('ocr_text', '')
+            if ocr_text:
+                parts.append(f"Extracted Text: {ocr_text}")
+            
+            # Join parts or add fallback
+            if len(parts) > 1:
+                content = ' | '.join(parts)
+            else:
+                content = parts[0] + " (no caption/OCR)"
         
         # Count words in this chunk
         chunk_words = len(content.split())
@@ -124,7 +153,7 @@ def create_prompt(obj: Dict[str, Any]) -> str:
                 # Take first part of the chunk to reach max_words
                 words_needed = max_words - total_words
                 words_in_chunk = content.split()[:words_needed]
-                content = f"\nChunk {idx} [text]: {' '.join(words_in_chunk)}..."
+                content = ' '.join(words_in_chunk) + "..."
                 content_parts.append(content)
                 log.info(f"Content truncated to {max_words} words (limit reached)")
             break
@@ -193,12 +222,17 @@ def write_prompt_response(out_dir: Path, stem: str,
         out.write_text(json.dumps(output_data, indent=2, ensure_ascii=False), encoding="utf-8")
         return out
 
-def process_pdf(pdf: Path, out_dir: Path,
-                agg: List[Dict[str, Any]]) -> None:
-    json_path = extract_pdf_to_json(pdf, out_dir)
+def process_pdf(
+    pdf: Path,
+    out_dir: Path,
+    agg: List[Dict[str, Any]],
+    config_overrides: Optional[Dict[str, Any]] = None
+) -> None:
+    """Process a single PDF through the full pipeline."""
+    json_path = extract_pdf_to_json(pdf, out_dir, config_overrides)
     json_obj  = json.loads(json_path.read_text(encoding="utf-8"))
 
-    prompt = create_prompt(json_obj)
+    prompt = create_prompt(json_obj, config_overrides)
     resp   = send_prompt(prompt, API_KEY)
 
     combined_json = write_prompt_response(out_dir, pdf.stem, prompt, resp)
@@ -216,7 +250,21 @@ def process_pdf(pdf: Path, out_dir: Path,
 def discover_pdfs(p: Path) -> List[Path]:
     return [p] if p.is_file() else sorted(p.rglob("*.pdf"))
 
-def run(input_path: Path, output_dir: Path, overwrite: bool) -> None:
+def run(
+    input_path: Path,
+    output_dir: Path,
+    overwrite: bool,
+    config_overrides: Optional[Dict[str, Any]] = None
+) -> None:
+    """
+    Run the full pipeline on PDFs.
+    
+    Args:
+        input_path: PDF file or directory
+        output_dir: Output directory
+        overwrite: Whether to overwrite existing aggregate JSON
+        config_overrides: Optional config overrides for this run
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
     agg_path = output_dir / "llama_responses.json"
     aggregated: List[Dict[str, Any]] = [] if overwrite or not agg_path.exists() \
@@ -229,7 +277,7 @@ def run(input_path: Path, output_dir: Path, overwrite: bool) -> None:
 
     for pdf in pdfs:
         try:
-            process_pdf(pdf, output_dir, aggregated)
+            process_pdf(pdf, output_dir, aggregated, config_overrides)
         except Exception as e:
             log.error("❌ %s failed: %s", pdf.name, e)
             aggregated.append({

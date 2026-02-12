@@ -5,17 +5,22 @@ PDF EXTRACTOR
 Single-file implementation of:
  • Docling text extraction  (embedded-text + OCR)
  • Optional pikepdf image extraction + BLIP captioning
+ • Image OCR extraction (PaddleOCR/EasyOCR)
  • Outputs one <stem>_dual.json next to the source or to --output-dir
 """
 
 from __future__ import annotations
 import base64, datetime, io, json, logging, sys, tempfile, time
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import pikepdf
 from pikepdf import PdfImage
 from PIL import Image
+
+# Import config and OCR handler
+from config import get_config, ExtractionConfig
+from ocr_handler import extract_text_from_image, is_ocr_available
 
 # ---------------------------------------------------------------------------
 # OPTIONAL deep-learning deps (handled gracefully if missing)
@@ -58,10 +63,22 @@ logging.basicConfig(
 )
 log = logging.getLogger("pdf_extractor")
 
-# --- tunables --------------------------------------------------------------
-MIN_WORDS = 200     # if text < threshold → also extract images
-MAX_IMAGES = 5
-MIN_AREA  = 50_000  # skip images smaller than this (w*h)
+# ---------------------------------------------------------------------------
+# Helper function to resize image keeping aspect ratio
+def _resize_keeping_aspect(img: Image.Image, max_dimension: int) -> Image.Image:
+    """Resize image so largest dimension is max_dimension, keeping aspect ratio."""
+    w, h = img.size
+    if max(w, h) <= max_dimension:
+        return img
+    
+    if w > h:
+        new_w = max_dimension
+        new_h = int(h * max_dimension / w)
+    else:
+        new_h = max_dimension
+        new_w = int(w * max_dimension / h)
+    
+    return img.resize((new_w, new_h), Image.Resampling.LANCZOS)
 
 # ---------------------------------------------------------------------------
 # Text cleaning function to handle OCR artifacts and Unicode issues
@@ -120,12 +137,38 @@ def _caption(pil: Image.Image) -> str:
         log.warning("BLIP failed: %s", e)
         return "<caption error>"
 
-def _extract_images(pdf_path: Path) -> List[Dict[str, Any]]:
-    """Return image elements with captions (largest by pixel area)."""
+def _extract_images(pdf_path: Path, config: ExtractionConfig) -> List[Dict[str, Any]]:
+    """
+    Return image elements with captions and OCR text (largest by pixel area).
+
+    Robustness notes:
+    - Filters with an absolute pixel floor.
+    - Filters with relative coverage against estimated page area.
+    - Keeps significant images per page using a ratio to the largest page image,
+      so useful images survive even when page-area estimation is imperfect.
+    """
     pdf = pikepdf.open(pdf_path)
-    meta: List[Dict[str, Any]] = []
+    elements: List[Dict[str, Any]] = []
+
+    ocr_enabled = config.ENABLE_IMAGE_OCR and is_ocr_available(config.OCR_ENGINE)
+    if config.ENABLE_IMAGE_OCR and not ocr_enabled:
+        log.warning("OCR requested but engine '%s' is unavailable; image OCR disabled", config.OCR_ENGINE)
+
+    all_candidates: List[Dict[str, Any]] = []
 
     for p_idx, page in enumerate(pdf.pages, 1):
+        # Estimate page area in point-space; treated as a stable proxy for relative filtering.
+        try:
+            box = page.mediabox if hasattr(page, "mediabox") else page.MediaBox
+            page_width = float(box[2] - box[0])
+            page_height = float(box[3] - box[1])
+            page_area_est = max(page_width * page_height, 1.0)
+        except Exception as exc:
+            log.warning("Failed to get page dimensions, using defaults: %s", exc)
+            page_area_est = config.DEFAULT_PAGE_WIDTH * config.DEFAULT_PAGE_HEIGHT
+
+        page_candidates: List[Dict[str, Any]] = []
+
         for name, obj in page.images.items():
             img = PdfImage(obj)
             with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
@@ -136,34 +179,96 @@ def _extract_images(pdf_path: Path) -> List[Dict[str, Any]]:
                 Path(out).unlink(missing_ok=True)
 
             w, h = pil.size
-            area = w * h
-            if area < MIN_AREA:
-                continue
-            meta.append({"pil": pil, "page": p_idx, "name": name, "area": area})
+            image_area = w * h
 
-    if not meta:
+            if image_area < config.MIN_IMAGE_AREA_PIXELS:
+                continue
+
+            page_candidates.append(
+                {
+                    "pil": pil,
+                    "page": p_idx,
+                    "name": name,
+                    "area": image_area,
+                    "page_area_est": page_area_est,
+                    "image_width": w,
+                    "image_height": h,
+                }
+            )
+
+        if not page_candidates:
+            continue
+
+        largest_area = max(c["area"] for c in page_candidates)
+
+        for candidate in page_candidates:
+            area = candidate["area"]
+            page_area_est = candidate["page_area_est"]
+            page_coverage = area / page_area_est if page_area_est > 0 else 0.0
+            rel_to_largest = area / largest_area if largest_area > 0 else 0.0
+
+            # Keep if it is page-significant OR among major images on that page.
+            if (
+                page_coverage >= config.MIN_IMAGE_AREA_PERCENT
+                or rel_to_largest >= config.MIN_IMAGE_RELATIVE_TO_LARGEST
+            ):
+                candidate["page_coverage"] = page_coverage
+                candidate["relative_to_largest"] = rel_to_largest
+                all_candidates.append(candidate)
+
+    if not all_candidates:
         return []
 
-    meta.sort(key=lambda m: m["area"], reverse=True)
-    selected = meta[:MAX_IMAGES]
-    elements: List[Dict[str, Any]] = []
+    all_candidates.sort(key=lambda m: m["area"], reverse=True)
+    selected = all_candidates[: config.MAX_IMAGES]
 
     for idx, m in enumerate(selected, 1):
         pil = m["pil"]
-        pil224 = pil.resize((224, 224))
+
+        # BLIP caption path
+        pil224 = pil.resize(config.BLIP_RESIZE)
+        caption = _caption(pil224)
+
+        # OCR path
+        ocr_text = ""
+        ocr_engine_used = None
+        if ocr_enabled:
+            ocr_pil = pil
+            if max(pil.size) > config.MAX_OCR_DIMENSION:
+                log.info("Resizing image from %s for OCR (max: %s)", pil.size, config.MAX_OCR_DIMENSION)
+                ocr_pil = _resize_keeping_aspect(pil, config.MAX_OCR_DIMENSION)
+
+            ocr_text = clean_text(
+                extract_text_from_image(
+                    ocr_pil,
+                    engine=config.OCR_ENGINE,
+                    languages=config.OCR_LANGUAGES,
+                )
+            )
+            ocr_engine_used = config.OCR_ENGINE if ocr_text else None
+
         buffer = io.BytesIO()
         pil224.save(buffer, format="JPEG", quality=85)
+
         elements.append(
             {
                 "element_id": f"image_{idx}",
                 "element_type": "image",
                 "page_number": m["page"],
-                "order": 0,  # will be set by caller
-                "caption": _caption(pil224),
-                "image_224_jpeg_base64": base64.b64encode(buffer.getvalue())
-                .decode(),
+                "order": 0,
+                "caption": caption,
+                "ocr_text": ocr_text,
+                "image_224_jpeg_base64": base64.b64encode(buffer.getvalue()).decode(),
+                "metadata": {
+                    "image_width": m["image_width"],
+                    "image_height": m["image_height"],
+                    "page_area_percentage_est": round(m["page_coverage"] * 100, 2),
+                    "relative_to_largest_on_page": round(m["relative_to_largest"], 3),
+                    "ocr_engine": ocr_engine_used,
+                },
             }
         )
+
     return elements
 
 # ---------------------------------------------------------------------------
@@ -247,12 +352,27 @@ def _docling_extract(path: Path) -> tuple[list[Dict[str, Any]], int]:
 
 # ---------------------------------------------------------------------------
 
-def extract_pdf_to_json(pdf_path: str | Path, output_dir: str | Path | None = None) -> Path:
+def extract_pdf_to_json(
+    pdf_path: str | Path,
+    output_dir: str | Path | None = None,
+    config_overrides: Optional[Dict[str, Any]] = None
+) -> Path:
     """
     Convert *pdf_path* → JSON and return JSON path.
 
-    JSON structure matches earlier code (text + optional images).
+    Args:
+        pdf_path: Path to PDF file
+        output_dir: Directory for output JSON (defaults to same as PDF)
+        config_overrides: Optional dict of config overrides
+        
+    Returns:
+        Path to generated JSON file
+        
+    JSON structure matches earlier code (text + optional images with OCR).
     """
+    # Get configuration with any overrides
+    config = get_config(config_overrides)
+    
     p = Path(pdf_path).resolve()
     if not p.exists() or p.suffix.lower() != ".pdf":
         raise FileNotFoundError(f"PDF not found: {p}")
@@ -264,9 +384,10 @@ def extract_pdf_to_json(pdf_path: str | Path, output_dir: str | Path | None = No
     word_cnt = sum(len(e["content"].split()) for e in text_elems)
 
     img_elems: List[Dict[str, Any]] = []
-    if word_cnt < MIN_WORDS:
-        log.info("Few words (%d) – extracting images …", word_cnt)
-        img_elems = _extract_images(p)
+    if word_cnt < config.MIN_WORDS:
+        log.info("Few words (%d) – extracting images with OCR=%s …",
+                 word_cnt, config.ENABLE_IMAGE_OCR)
+        img_elems = _extract_images(p, config)
         # order = after all text
         for i, e in enumerate(img_elems, 1):
             e["order"] = len(text_elems) + i
@@ -278,6 +399,8 @@ def extract_pdf_to_json(pdf_path: str | Path, output_dir: str | Path | None = No
             "total_pages": page_cnt,
             "word_count": word_cnt,
             "extracted_at": datetime.datetime.now().isoformat(),
+            "ocr_enabled": config.ENABLE_IMAGE_OCR,
+            "ocr_engine": config.OCR_ENGINE if config.ENABLE_IMAGE_OCR else None,
         },
         "elements": all_elems,
     }

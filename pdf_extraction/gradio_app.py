@@ -60,12 +60,14 @@ class UnverifiedSession(requests.Session):
 requests.Session = UnverifiedSession
 
 from pdf_pipeline import run as pipeline_run
+from config import DEFAULT_CONFIG
 
 OUTPUT_DIR = Path("output")
 OUTPUT_DIR.mkdir(exist_ok=True)
 
 # In-memory cache for the current Gradio session
 CACHE: Dict[str, Dict[str, Any]] = {}
+DOC_SELECTION_MAP: Dict[str, str] = {}  # dropdown label -> cache key
 MAX_FILES = 5  # Maximum PDFs that can be uploaded at once
 
 # ---------------------------------------------------------------------------
@@ -92,11 +94,35 @@ def create_pdf_viewer_html(pdf_path: str) -> str:
         # Fallback: provide download link
         return f"<p>Unable to display PDF. <a href='{pdf_path}' download>Download</a> (error: {exc})</p>"
 
-def _process_single_pdf(pdf_path: Path) -> Dict[str, Any]:
-    """Run the pipeline on a single PDF (if not already cached) and return meta."""
-    stem = pdf_path.stem
-    if stem in CACHE:
-        return CACHE[stem]
+def _process_single_pdf(
+    pdf_path: Path,
+    enable_ocr: bool = True,
+    ocr_engine: str = "paddleocr",
+    ocr_language: str = "en",
+    min_words_trigger: int = 200,
+    min_image_area_pixels: int = 50000,
+    min_image_area_percent: float = 0.15,
+    max_images: int = 5,
+) -> Dict[str, Any]:
+    """
+    Run the pipeline on a single PDF (if not already cached) and return meta.
+    
+    Args:
+        pdf_path: Path to PDF file
+        enable_ocr: Whether to enable OCR on images
+        ocr_language: OCR language code
+        
+    Returns:
+        Metadata dict with processing results
+    """
+    # Create cache key including OCR settings
+    cache_key = (
+        f"{pdf_path.stem}:ocr={enable_ocr}:engine={ocr_engine}:lang={ocr_language}:"
+        f"minw={min_words_trigger}:minpx={min_image_area_pixels}:minpct={min_image_area_percent}:maximg={max_images}"
+    )
+    
+    if cache_key in CACHE:
+        return CACHE[cache_key]
 
     # Ensure file is in a stable location (copy to output if uploaded tmp file)
     stable_path = OUTPUT_DIR / pdf_path.name
@@ -104,9 +130,20 @@ def _process_single_pdf(pdf_path: Path) -> Dict[str, Any]:
         shutil.copy2(pdf_path, stable_path)
         pdf_path = stable_path
 
+    # Build config overrides
+    config_overrides = {
+        "MIN_WORDS": int(min_words_trigger),
+        "MIN_IMAGE_AREA_PIXELS": int(min_image_area_pixels),
+        "MIN_IMAGE_AREA_PERCENT": float(min_image_area_percent),
+        "MAX_IMAGES": int(max_images),
+        "ENABLE_IMAGE_OCR": bool(enable_ocr),
+        "OCR_ENGINE": ocr_engine,
+        "OCR_LANGUAGES": [ocr_language],
+    }
+
     try:
-        # Run the pipeline (no overwrite – we want caching on disk as well)
-        pipeline_run(pdf_path, OUTPUT_DIR, overwrite=False)
+        # Run the pipeline with config overrides
+        pipeline_run(pdf_path, OUTPUT_DIR, overwrite=False, config_overrides=config_overrides)
     except Exception as e:
         # Handle pipeline failures gracefully
         meta = {
@@ -116,12 +153,14 @@ def _process_single_pdf(pdf_path: Path) -> Dict[str, Any]:
             "summary": f"Processing failed: {str(e)}",
             "label": "error",
             "prompt_content": "",
-            "error": True
+            "error": True,
+            "cache_key": cache_key
         }
-        CACHE[stem] = meta
+        CACHE[cache_key] = meta
         return meta
 
     # Derive expected JSON paths
+    stem = pdf_path.stem
     extract_json = OUTPUT_DIR / f"{stem}_dual.json"
     prompt_json = OUTPUT_DIR / f"{stem}_prompt_response.json"
 
@@ -134,9 +173,10 @@ def _process_single_pdf(pdf_path: Path) -> Dict[str, Any]:
             "summary": "Processing completed but response file not found",
             "label": "unknown",
             "prompt_content": "",
-            "error": True
+            "error": True,
+            "cache_key": cache_key
         }
-        CACHE[stem] = meta
+        CACHE[cache_key] = meta
         return meta
 
     try:
@@ -157,15 +197,40 @@ def _process_single_pdf(pdf_path: Path) -> Dict[str, Any]:
         "summary": summary,
         "label": label,
         "prompt_content": prompt_data.get("llm_prompt", {}).get("content", "") if 'prompt_data' in locals() else "",
-        "error": False
+        "error": False,
+        "cache_key": cache_key
     }
-    CACHE[stem] = meta
+    CACHE[cache_key] = meta
     return meta
 
 # ---------------------------------------------------------------------------
 # Gradio Callbacks
 
-def process_pdfs(files: List[str], caching_enabled: bool, session_docs: List[str]) -> tuple[gr.Dropdown, str, List[str]]:
+def process_pdfs(
+    files: List[str],
+    caching_enabled: bool,
+    enable_ocr: bool,
+    ocr_engine: str,
+    ocr_language: str,
+    min_words_trigger: int,
+    min_image_area_pixels: int,
+    min_image_area_percent: float,
+    max_images: int,
+    session_docs: List[str]
+) -> tuple[gr.Dropdown, str, List[str]]:
+    """
+    Process uploaded PDFs with current OCR settings.
+    
+    Args:
+        files: List of file paths
+        caching_enabled: Whether to keep session cache
+        enable_ocr: Whether to enable OCR
+        ocr_language: OCR language code
+        session_docs: Current session documents
+        
+    Returns:
+        Updated dropdown, status message, updated session docs
+    """
     if not files:
         return gr.update(), "No files selected.", session_docs
     if len(files) > MAX_FILES:
@@ -176,19 +241,42 @@ def process_pdfs(files: List[str], caching_enabled: bool, session_docs: List[str
         session_docs = []
 
     for file_path in files:
-        meta = _process_single_pdf(Path(file_path))
+        meta = _process_single_pdf(
+            Path(file_path),
+            enable_ocr=enable_ocr,
+            ocr_engine=ocr_engine,
+            ocr_language=ocr_language,
+            min_words_trigger=min_words_trigger,
+            min_image_area_pixels=min_image_area_pixels,
+            min_image_area_percent=min_image_area_percent,
+            max_images=max_images,
+        )
         stem = Path(file_path).stem
-        if stem not in session_docs:
-            session_docs.append(stem)
+        display_name = (
+            f"{stem} [ocr={'on' if enable_ocr else 'off'}, "
+            f"engine={ocr_engine}, lang={ocr_language}]"
+        )
+        DOC_SELECTION_MAP[display_name] = meta["cache_key"]
+        if display_name not in session_docs:
+            session_docs.append(display_name)
 
     latest = session_docs[-1] if session_docs else None
-    return gr.update(choices=session_docs, value=latest), f"Processed {len(files)} file(s).", session_docs
+    ocr_status = (
+        f" (OCR: {'ON' if enable_ocr else 'OFF'}, Engine: {ocr_engine}, Lang: {ocr_language})"
+        if enable_ocr else " (OCR: OFF)"
+    )
+    return gr.update(choices=session_docs, value=latest), f"Processed {len(files)} file(s).{ocr_status}", session_docs
 
 
 def show_document(doc_key: str, session_docs: List[str]):
     if not doc_key or doc_key not in session_docs:
         return None, "", "", "", "", ""
-    data = CACHE[doc_key]
+
+    cache_key = DOC_SELECTION_MAP.get(doc_key)
+    if not cache_key or cache_key not in CACHE:
+        return None, "", "", "", "", "Selected document not found in cache"
+
+    data = CACHE[cache_key]
     
     pdf_html = create_pdf_viewer_html(data.get("pdf_path", ""))
 
@@ -231,6 +319,57 @@ with gr.Blocks(title="PDF Pipeline UI") as demo:
         file_uploader = gr.File(type="filepath", file_count="multiple", label="Upload PDF(s)")
         status = gr.Textbox(label="Status", interactive=False)
         caching_checkbox = gr.Checkbox(label="📌 Enable caching", value=False)
+    
+    # OCR Extraction Options
+    with gr.Accordion("⚙️ Extraction Options", open=False):
+        with gr.Row():
+            enable_ocr = gr.Checkbox(
+                label="Enable Image OCR",
+                value=DEFAULT_CONFIG.ENABLE_IMAGE_OCR,
+                info="Extract text from PDF-embedded images"
+            )
+            ocr_engine = gr.Dropdown(
+                choices=["paddleocr", "easyocr"],
+                value=DEFAULT_CONFIG.OCR_ENGINE,
+                label="OCR Engine",
+                info="Default is PaddleOCR; EasyOCR kept as fallback"
+            )
+            ocr_language = gr.Dropdown(
+                choices=["en", "ch", "fr", "de", "es", "it", "ja", "ko", "ru"],
+                value="en",
+                label="OCR Language",
+                info="Primary language code"
+            )
+        with gr.Row():
+            min_words_trigger = gr.Number(
+                value=DEFAULT_CONFIG.MIN_WORDS,
+                label="Image Extraction Trigger (min words)",
+                precision=0,
+                minimum=0,
+                info="If docling word count is below this, image extraction is enabled"
+            )
+            min_image_area_pixels = gr.Number(
+                value=DEFAULT_CONFIG.MIN_IMAGE_AREA_PIXELS,
+                label="Min Image Area (pixels)",
+                precision=0,
+                minimum=1,
+                info="Absolute size floor"
+            )
+            min_image_area_percent = gr.Slider(
+                minimum=0.01,
+                maximum=1.0,
+                value=DEFAULT_CONFIG.MIN_IMAGE_AREA_PERCENT,
+                step=0.01,
+                label="Min Relative Image/Page Area",
+                info="Relative size filter against estimated page area"
+            )
+            max_images = gr.Number(
+                value=DEFAULT_CONFIG.MAX_IMAGES,
+                label="Max Images",
+                precision=0,
+                minimum=1,
+                info="Upper bound of image elements passed to LLM"
+            )
 
     # Per-session list of document stems
     docs_state = gr.State([])
@@ -240,21 +379,34 @@ with gr.Blocks(title="PDF Pipeline UI") as demo:
     pdf_viewer = gr.HTML(label="PDF Preview")
 
     with gr.Row():
-        summary_out  = gr.Textbox(label="LLM Summary", show_copy_button=True)
+        summary_out  = gr.Textbox(label="LLM Summary")
         label_out    = gr.Textbox(label="Classification Label")
 
     with gr.Tabs():
         with gr.TabItem("Prompt & Response (JSON)"):
             prompt_json_tab  = gr.Code(label="LLM Prompt & Response JSON", language="json")
         with gr.TabItem("Prompt & Response (Text)"):
-            prompt_text_tab = gr.Textbox(label="LLM Prompt (plain text)", lines=10, show_copy_button=True)
+            prompt_text_tab = gr.Textbox(label="LLM Prompt (plain text)", lines=10)
         with gr.TabItem("Extraction JSON"):
             extract_json = gr.Code(label="Document Extraction Data", language="json")
 
     # Wiring callbacks
-    file_uploader.upload(process_pdfs,
-                        inputs=[file_uploader, caching_checkbox, docs_state],
-                        outputs=[docs_dropdown, status, docs_state])
+    file_uploader.upload(
+        process_pdfs,
+        inputs=[
+            file_uploader,
+            caching_checkbox,
+            enable_ocr,
+            ocr_engine,
+            ocr_language,
+            min_words_trigger,
+            min_image_area_pixels,
+            min_image_area_percent,
+            max_images,
+            docs_state,
+        ],
+        outputs=[docs_dropdown, status, docs_state]
+    )
 
     docs_dropdown.change(show_document,
                         inputs=[docs_dropdown, docs_state],
