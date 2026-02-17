@@ -68,11 +68,10 @@ def _get_paddleocr_instance(lang: str) -> Optional[PaddleOCR]:
     if lang not in _PADDLE_OCR_INSTANCES:
         try:
             log.info(f"Initializing PaddleOCR for language: {lang}")
+            # Use minimal parameters for maximum compatibility
             _PADDLE_OCR_INSTANCES[lang] = PaddleOCR(
-                use_angle_cls=True,  # Detect text orientation
-                lang=lang,
-                show_log=False,      # Suppress verbose logs
-                use_gpu=False        # Use CPU (set True if GPU available)
+                use_angle_cls=True,
+                lang=lang
             )
         except Exception as e:
             log.error(f"Failed to initialize PaddleOCR: {e}")
