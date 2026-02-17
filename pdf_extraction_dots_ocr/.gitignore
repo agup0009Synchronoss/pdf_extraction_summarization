@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+venv_dot_ocr/
+.venv/
+env/
+ENV/
+
+# Output files
+output/
+debug_output/
+*.pdf
+*.json
+*.txt
+!requirements.txt
+!README.md
+!notes_for_DOT_ocr.txt
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
