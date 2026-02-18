@@ -124,39 +124,79 @@ class DotsExtractor:
         """
         Resolve the model path to use for loading.
 
-        transformers>=4.49 derives a Python module name from the HF repo ID when
-        trust_remote_code=True.  A dot in the repo name (e.g. 'dots.ocr') makes
-        Python treat it as a sub-package import and raises:
-            ModuleNotFoundError: No module named 'transformers_modules.rednote-hilab.dots'
+        Two issues with loading rednote-hilab/dots.ocr directly as an HF repo ID:
 
-        The official dots.ocr docs note: "use a directory name without periods".
-        Fix: if the HF model ID contains a dot, snapshot-download it once to a
-        safe local directory (dots replaced with underscores) and load from there.
+        1. **Dots in name break Python imports** — transformers>=4.49 derives a
+           Python module name from the HF repo ID for trust_remote_code models.
+           ``dots.ocr`` becomes ``transformers_modules.rednote-hilab.dots.ocr``,
+           which Python interprets as package ``dots`` with submodule ``ocr``.
+
+        2. **Missing video_processor fix** — the upstream model's
+           ``configuration_dots.py`` doesn't override the ``attributes`` list, so
+           the processor inherits ``video_processor`` from the Qwen2.5-VL parent
+           class and fails with ``NoneType for argument video_processor``.
+           (Unmerged upstream PR: HF dots.ocr discussions/38)
+
+        Fix: snapshot-download to a safe local directory (no dots), then patch
+        ``configuration_dots.py`` to add the ``attributes`` override.
         """
         model_path = self.config.DOTS_MODEL_PATH
 
-        # Already a local path — use as-is.
         if Path(model_path).exists():
+            self._patch_model_config(Path(model_path))
             return model_path
 
-        # HF repo ID with a dot in the model name → needs local download.
         if "/" in model_path:
             model_name = model_path.split("/", 1)[1]
             if "." in model_name:
                 safe_name = model_name.replace(".", "_")
                 local_dir = Path("./hf_cache") / safe_name
-                if (local_dir / "config.json").exists():
+                if not (local_dir / "config.json").exists():
+                    log.info(
+                        "Downloading %s to local path %s ...",
+                        model_path, local_dir,
+                    )
+                    from huggingface_hub import snapshot_download
+                    snapshot_download(model_path, local_dir=str(local_dir))
+                else:
                     log.info("Using cached local model at: %s", local_dir)
-                    return str(local_dir)
-                log.info(
-                    "Downloading %s to local path %s (avoids dots-in-module-name error)...",
-                    model_path, local_dir,
-                )
-                from huggingface_hub import snapshot_download
-                snapshot_download(model_path, local_dir=str(local_dir))
+                self._patch_model_config(local_dir)
                 return str(local_dir)
 
         return model_path
+
+    @staticmethod
+    def _patch_model_config(model_dir: Path):
+        """
+        Apply the video_processor fix to configuration_dots.py if not already
+        patched.  This is the fix from HuggingFace dots.ocr discussion #38:
+        override ``attributes`` so the processor only requires image_processor
+        and tokenizer (not video_processor), and accept video_processor=None in
+        __init__ so the parent class doesn't raise TypeError.
+        """
+        config_file = model_dir / "configuration_dots.py"
+        if not config_file.exists():
+            return
+
+        content = config_file.read_text(encoding="utf-8")
+
+        # Already patched — the attributes override is the marker.
+        if 'attributes = ["image_processor", "tokenizer"]' in content:
+            return
+
+        log.info("Patching %s to fix video_processor TypeError (HF dots.ocr #38)", config_file)
+
+        # Patch 1: Add attributes list to DotsVLProcessor
+        content = content.replace(
+            "class DotsVLProcessor(Qwen2_5_VLProcessor):\n"
+            "    def __init__(self, image_processor=None, tokenizer=None, chat_template=None, **kwargs):",
+            "class DotsVLProcessor(Qwen2_5_VLProcessor):\n"
+            '    attributes = ["image_processor", "tokenizer"]\n'
+            "    def __init__(self, image_processor=None, tokenizer=None, video_processor=None, chat_template=None, **kwargs):",
+        )
+
+        config_file.write_text(content, encoding="utf-8")
+        log.info("Patch applied successfully")
 
     def _load_model(self):
         """Lazy-load model and processor on first call to avoid GPU memory at import time."""
@@ -176,7 +216,6 @@ class DotsExtractor:
         self._processor = AutoProcessor.from_pretrained(
             resolved_path,
             trust_remote_code=True,
-            use_fast=False,
         )
         log.info("DOTS model loaded successfully (device: %s)", self.effective_device)
 

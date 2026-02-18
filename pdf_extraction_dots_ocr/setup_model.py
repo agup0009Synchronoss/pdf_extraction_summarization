@@ -110,20 +110,57 @@ def download_model():
     print("─" * 60)
     if (LOCAL_DIR / "config.json").exists():
         print(f"✅ Model already downloaded at: {LOCAL_DIR.resolve()}")
-        return True
+    else:
+        print(f"Downloading {HF_MODEL_ID} → {LOCAL_DIR.resolve()}")
+        print("(This is ~6 GB and only happens once)\n")
+        LOCAL_DIR.mkdir(parents=True, exist_ok=True)
 
-    print(f"Downloading {HF_MODEL_ID} → {LOCAL_DIR.resolve()}")
-    print("(This is ~6 GB and only happens once)\n")
-    LOCAL_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            from huggingface_hub import snapshot_download
+            snapshot_download(HF_MODEL_ID, local_dir=str(LOCAL_DIR))
+            print(f"\n✅ Model downloaded to: {LOCAL_DIR.resolve()}")
+        except Exception as e:
+            print(f"\n❌ Download failed: {e}")
+            return False
 
-    try:
-        from huggingface_hub import snapshot_download
-        snapshot_download(HF_MODEL_ID, local_dir=str(LOCAL_DIR))
-        print(f"\n✅ Model downloaded to: {LOCAL_DIR.resolve()}")
-        return True
-    except Exception as e:
-        print(f"\n❌ Download failed: {e}")
-        return False
+    patch_model_config()
+    return True
+
+
+def patch_model_config():
+    """
+    Apply the video_processor fix from HF dots.ocr discussion #38.
+
+    The upstream model's configuration_dots.py does not override `attributes`
+    on DotsVLProcessor, so the parent class (Qwen2_5_VLProcessor) injects a
+    `video_processor` requirement that fails with NoneType.
+
+    Fix: override `attributes` to only list image_processor and tokenizer,
+    and accept (but ignore) video_processor=None in __init__.
+    """
+    config_file = LOCAL_DIR / "configuration_dots.py"
+    if not config_file.exists():
+        print("  ⚠️  configuration_dots.py not found — skipping patch")
+        return
+
+    content = config_file.read_text(encoding="utf-8")
+
+    if 'attributes = ["image_processor", "tokenizer"]' in content:
+        print("  ✅ video_processor patch already applied")
+        return
+
+    print("  Applying video_processor patch to configuration_dots.py ...")
+
+    content = content.replace(
+        "class DotsVLProcessor(Qwen2_5_VLProcessor):\n"
+        "    def __init__(self, image_processor=None, tokenizer=None, chat_template=None, **kwargs):",
+        "class DotsVLProcessor(Qwen2_5_VLProcessor):\n"
+        '    attributes = ["image_processor", "tokenizer"]\n'
+        "    def __init__(self, image_processor=None, tokenizer=None, video_processor=None, chat_template=None, **kwargs):",
+    )
+
+    config_file.write_text(content, encoding="utf-8")
+    print("  ✅ Patch applied successfully")
 
 
 def verify_model_loads():
@@ -137,7 +174,6 @@ def verify_model_loads():
         processor = AutoProcessor.from_pretrained(
             str(LOCAL_DIR),
             trust_remote_code=True,
-            use_fast=False,
         )
         print("  ✅ Processor loaded")
 
