@@ -33,15 +33,14 @@ class DotsConfig:
     # Performance presets
     PERFORMANCE_PRESET: str = "balanced"  # Options: "fast", "balanced", "high_quality"
 
-    # vLLM server connection (local DOTS OCR model); overridable via VLLM_HOST, VLLM_PORT
-    VLLM_HOST: str = field(default_factory=lambda: os.environ.get("VLLM_HOST", "localhost"))
-    VLLM_PORT: int = field(default_factory=lambda: int(os.environ.get("VLLM_PORT", "8000")))
-    VLLM_PROTOCOL: str = "http"
-    VLLM_MODEL_NAME: str = "model"  # matches --served-model-name
-    VLLM_TEMPERATURE: float = 0.1
-    VLLM_TOP_P: float = 1.0
-    VLLM_MAX_TOKENS: int = 16384
-    DOTS_PROMPT_MODE: str = "prompt_layout_all_en"
+    # DOTS model (HuggingFace Transformers in-process)
+    # Set DOTS_MODEL_PATH env var to a local weights dir (e.g. ./weights/DotsOCR) to avoid re-downloads.
+    DOTS_MODEL_PATH: str = field(default_factory=lambda: os.environ.get("DOTS_MODEL_PATH", "rednote-hilab/dots.ocr"))
+    DOTS_MAX_NEW_TOKENS: int = 24000
+    # Use "sdpa" if flash_attn is not installed; "flash_attention_2" requires the flash-attn package.
+    DOTS_ATTN_IMPLEMENTATION: str = field(
+        default_factory=lambda: os.environ.get("DOTS_ATTN_IMPLEMENTATION", "sdpa")
+    )
 
     # NOTE: LLM endpoint / model / API key (for summary/classification) are in call_llama_api.py.
 
@@ -123,12 +122,6 @@ class DotsConfig:
         }
         
         return presets.get(self.PERFORMANCE_PRESET, presets["balanced"])
-
-    @property
-    def vllm_base_url(self) -> str:
-        """Base URL for the local vLLM server (DOTS OCR model)."""
-        return f"{self.VLLM_PROTOCOL}://{self.VLLM_HOST}:{self.VLLM_PORT}/v1"
-
 
 # Default global configuration
 DEFAULT_CONFIG = DotsConfig()

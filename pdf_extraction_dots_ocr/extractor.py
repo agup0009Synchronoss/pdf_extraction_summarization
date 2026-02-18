@@ -2,25 +2,25 @@
 DOTS Extractor Module
 =====================
 
-Real DOTS OCR extraction via local vLLM server:
+Real DOTS OCR extraction via HuggingFace Transformers (in-process):
 - Rasterize PDF pages with PyMuPDF (fitz)
 - Resize images to model-friendly pixel bounds
-- Call local vLLM (rednote-hilab/dots.ocr-1.5) with image + layout prompt
+- Run rednote-hilab/dots.ocr via model.generate() locally
 - Parse response and normalize for prompt bridge
 """
 
-import base64
-import io
 import json
 import logging
 import math
+import tempfile
+import torch
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 import datetime
 
 log = logging.getLogger("dots_extractor")
 
-# DOTS layout prompt (prompt_layout_all_en) — same as dots_ocr.utils.prompts
+# DOTS layout prompt (prompt_layout_all_en)
 DOTS_LAYOUT_PROMPT = """Please output the layout information from the PDF image, including each layout element's bbox, its category, and the corresponding text content within the bbox.
 
 1. Bbox format: [x1, y1, x2, y2]
@@ -45,7 +45,7 @@ IMAGE_FACTOR = 28
 MIN_PIXELS = 3136
 MAX_PIXELS = 11_289_600
 
-# Map DOTS category to internal element type and content key for normalizer
+# Map DOTS category to internal element type
 DOTS_CATEGORY_TO_TYPE = {
     "Title": "text",
     "Text": "text",
@@ -100,16 +100,9 @@ def smart_resize(
     return h_bar, w_bar
 
 
-def _pil_to_base64_data_url(pil_image, fmt: str = "PNG") -> str:
-    buf = io.BytesIO()
-    pil_image.save(buf, format=fmt)
-    b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
-    return f"data:image/{fmt.lower()};base64,{b64}"
-
-
 class DotsExtractor:
     """
-    DOTS extraction service using local vLLM server.
+    DOTS extraction service using HuggingFace Transformers (in-process inference).
 
     Interface contract:
     - Input: PDF path, page options, quality options
@@ -119,7 +112,33 @@ class DotsExtractor:
     def __init__(self, config):
         self.config = config
         self.effective_device = config.get_effective_device()
-        log.info("DotsExtractor initialized (vLLM at %s, device: %s)", config.vllm_base_url, self.effective_device)
+        self._model = None
+        self._processor = None
+        log.info(
+            "DotsExtractor initialized (model=%s, device=%s)",
+            config.DOTS_MODEL_PATH,
+            self.effective_device,
+        )
+
+    def _load_model(self):
+        """Lazy-load model and processor on first call to avoid GPU memory at import time."""
+        if self._model is not None:
+            return
+        from transformers import AutoModelForCausalLM, AutoProcessor
+
+        log.info("Loading DOTS model from %s ...", self.config.DOTS_MODEL_PATH)
+        self._model = AutoModelForCausalLM.from_pretrained(
+            self.config.DOTS_MODEL_PATH,
+            attn_implementation=self.config.DOTS_ATTN_IMPLEMENTATION,
+            torch_dtype=torch.bfloat16,
+            device_map="auto",
+            trust_remote_code=True,
+        )
+        self._processor = AutoProcessor.from_pretrained(
+            self.config.DOTS_MODEL_PATH,
+            trust_remote_code=True,
+        )
+        log.info("DOTS model loaded successfully (device: %s)", self.effective_device)
 
     def extract_pdf(self, pdf_path: Path, page_cap: Optional[int] = None) -> Dict[str, Any]:
         page_cap = page_cap or self.config.PAGE_CAP
@@ -127,7 +146,7 @@ class DotsExtractor:
 
         log.info("Extracting PDF: %s (page_cap=%s, dpi=%s)", pdf_path.name, page_cap, dpi)
 
-        raw_result, debug_dir = self._run_real_extraction(pdf_path, page_cap, dpi)
+        raw_result, debug_dir = self._run_extraction(pdf_path, page_cap, dpi)
         normalized_result = self._normalize_extraction(raw_result, pdf_path)
 
         metadata = {
@@ -136,7 +155,8 @@ class DotsExtractor:
             "dpi": dpi,
             "device_policy": self.config.DEVICE_POLICY,
             "effective_device": self.effective_device,
-            "backend": "vllm",
+            "backend": "transformers",
+            "model_path": self.config.DOTS_MODEL_PATH,
             "extraction_timestamp": datetime.datetime.now().isoformat(),
         }
         if debug_dir is not None:
@@ -148,8 +168,8 @@ class DotsExtractor:
             "metadata": metadata,
         }
 
-    def _run_real_extraction(self, pdf_path: Path, page_cap: int, dpi: int) -> tuple:
-        """Rasterize PDF, call vLLM per page, aggregate raw results. Returns (raw_result, debug_dir or None)."""
+    def _run_extraction(self, pdf_path: Path, page_cap: int, dpi: int) -> tuple:
+        """Rasterize PDF, run model per page, aggregate raw results. Returns (raw_result, debug_dir or None)."""
         import fitz
         from PIL import Image
 
@@ -160,6 +180,9 @@ class DotsExtractor:
             debug_dir = base / f"{pdf_path.stem}_{ts}"
             debug_dir.mkdir(parents=True, exist_ok=True)
             log.info("Debug artifacts will be saved to: %s", debug_dir)
+
+        # Load model once before processing pages
+        self._load_model()
 
         pages_out = []
         with fitz.open(pdf_path) as doc:
@@ -178,10 +201,10 @@ class DotsExtractor:
                 if debug_dir is not None:
                     img_path = debug_dir / f"page_{page_num}_image.png"
                     pil_resized.save(img_path)
-                elements, raw_response = self._call_vllm(pil_resized, page_num, debug_dir)
+                elements, raw_response = self._call_transformers(pil_resized, page_num, debug_dir)
                 if debug_dir is not None and raw_response is not None:
-                    (debug_dir / f"page_{page_num}_vllm_response.txt").write_text(raw_response, encoding="utf-8")
-                    parsed_path = debug_dir / f"page_{page_num}_vllm_parsed.json"
+                    (debug_dir / f"page_{page_num}_model_response.txt").write_text(raw_response, encoding="utf-8")
+                    parsed_path = debug_dir / f"page_{page_num}_model_parsed.json"
                     parsed_path.write_text(json.dumps(elements, indent=2, ensure_ascii=False), encoding="utf-8")
                 reading_order = list(range(len(elements)))
                 pages_out.append({
@@ -198,7 +221,7 @@ class DotsExtractor:
             "processed_pages": len(pages_out),
             "dpi": dpi,
             "pages": pages_out,
-            "format_version": "dots_vllm_1.0",
+            "format_version": "dots_transformers_1.0",
         }
         return raw_result, debug_dir
 
@@ -228,47 +251,78 @@ class DotsExtractor:
             return pil_image
         return pil_image.resize((new_w, new_h), Image.Resampling.LANCZOS)
 
-    def _call_vllm(self, pil_image, page_num: int, debug_dir: Optional[Path] = None) -> tuple:
-        """Send image to local vLLM and return (parsed elements, raw response text or None)."""
-        from openai import OpenAI
+    def _call_transformers(self, pil_image, page_num: int, debug_dir: Optional[Path] = None) -> tuple:
+        """Run DOTS model on one page image and return (parsed elements, raw response text or None)."""
+        from qwen_vl_utils import process_vision_info
 
-        prompt = DOTS_LAYOUT_PROMPT
-        image_url = _pil_to_base64_data_url(pil_image)
-
-        client = OpenAI(
-            base_url=self.config.vllm_base_url,
-            api_key="EMPTY",
-        )
         try:
-            response = client.chat.completions.create(
-                model=self.config.VLLM_MODEL_NAME,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "image_url", "image_url": {"url": image_url}},
-                            {"type": "text", "text": f"<|img|><|imgpad|><|endofimg|>{prompt}"},
-                        ],
-                    }
-                ],
-                max_tokens=self.config.VLLM_MAX_TOKENS,
-                temperature=self.config.VLLM_TEMPERATURE,
-                top_p=self.config.VLLM_TOP_P,
+            # Save PIL image to a temp file so the processor can handle it via standard path
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                tmp_path = tmp.name
+            pil_image.save(tmp_path)
+
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image", "image": tmp_path},
+                        {"type": "text", "text": DOTS_LAYOUT_PROMPT},
+                    ],
+                }
+            ]
+
+            text = self._processor.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
             )
-            content = response.choices[0].message.content
+            image_inputs, video_inputs = process_vision_info(messages)
+            inputs = self._processor(
+                text=[text],
+                images=image_inputs,
+                videos=video_inputs,
+                padding=True,
+                return_tensors="pt",
+            )
+            inputs = inputs.to(self.effective_device)
+
+            with torch.no_grad():
+                generated_ids = self._model.generate(
+                    **inputs,
+                    max_new_tokens=self.config.DOTS_MAX_NEW_TOKENS,
+                )
+
+            generated_ids_trimmed = [
+                out_ids[len(in_ids):]
+                for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
+            ]
+            output_texts = self._processor.batch_decode(
+                generated_ids_trimmed,
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=False,
+            )
+            content = output_texts[0] if output_texts else ""
+
+            # Clean up temp file
+            try:
+                Path(tmp_path).unlink()
+            except Exception:
+                pass
+
             if not content:
-                log.warning("Empty vLLM response for page %s", page_num)
+                log.warning("Empty model response for page %s", page_num)
                 return [], None
-            elements = self._parse_vllm_response(content, page_num)
+
+            elements = self._parse_model_response(content, page_num)
             return elements, content
+
         except Exception as e:
-            log.warning("vLLM call failed for page %s: %s", page_num, e)
+            log.warning("Model inference failed for page %s: %s", page_num, e)
             return [], None
 
-    def _parse_vllm_response(self, raw_text: str, page_num: int) -> List[Dict[str, Any]]:
+    def _parse_model_response(self, raw_text: str, page_num: int) -> List[Dict[str, Any]]:
         """Lenient parse of DOTS JSON response into elements with type/bbox/text/html/latex."""
         text = raw_text.strip()
-        # Try raw JSON
         try:
             data = json.loads(text)
         except json.JSONDecodeError:
@@ -288,7 +342,6 @@ class DotsExtractor:
                 log.warning("Page %s: response is not valid JSON", page_num)
                 return []
 
-        # DOTS can return a list of elements or an object (e.g. {"elements": [...]})
         if isinstance(data, list):
             items = data
         elif isinstance(data, dict):
@@ -309,7 +362,7 @@ class DotsExtractor:
                 continue
             bbox = el.get("bbox", [])
             category = el.get("category", "Text")
-            raw_text = el.get("text", "")
+            el_text = el.get("text", "")
             elem_type = DOTS_CATEGORY_TO_TYPE.get(category, "text")
             if elem_type == "picture":
                 continue  # no text field per DOTS spec
@@ -320,11 +373,11 @@ class DotsExtractor:
                 "confidence": el.get("confidence", 0.0),
             }
             if elem_type == "table":
-                rec["html"] = raw_text
+                rec["html"] = el_text
             elif elem_type == "formula":
-                rec["latex"] = raw_text
+                rec["latex"] = el_text
             else:
-                rec["text"] = raw_text
+                rec["text"] = el_text
             out.append(rec)
         return out
 
@@ -390,6 +443,6 @@ class DotsExtractor:
 
 
 def extract_pdf_with_dots(pdf_path: Path, config) -> Dict[str, Any]:
-    """Convenience: extract PDF with DOTS (local vLLM backend)."""
+    """Convenience: extract PDF with DOTS (HF Transformers backend)."""
     extractor = DotsExtractor(config)
     return extractor.extract_pdf(pdf_path)

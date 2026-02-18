@@ -12,6 +12,80 @@ Moderate UI with key controls:
 - Output panels for all artifacts
 """
 
+# ---------------------------------------------------------------------------
+# SSL bypass — must run before any HuggingFace / requests / httpx imports.
+# huggingface_hub uses httpx (not requests) for all Hub HTTP calls, so we
+# must patch both. The requests patch covers Gradio; the httpx patch covers
+# from_pretrained / Hub downloads; configure_http_backend is the official
+# HF hook that overrides the internal httpx session factory.
+import os
+import ssl
+import urllib3
+import warnings
+import requests
+
+# Environment flags read by huggingface_hub and urllib before any connection
+os.environ['PYTHONHTTPSVERIFY'] = '0'
+os.environ['REQUESTS_CA_BUNDLE'] = ''
+os.environ['CURL_CA_BUNDLE'] = ''
+os.environ['SSL_CERT_FILE'] = ''
+os.environ['HF_HUB_DISABLE_SSL_VERIFICATION'] = '1'
+os.environ['HF_HOME'] = './hf_cache'
+os.environ['HF_HUB_DISABLE_SYMLINKS_WARNING'] = '1'
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+warnings.filterwarnings('ignore', message='Unverified HTTPS request')
+
+# Python ssl — covers any stdlib https call
+ssl._create_default_https_context = ssl._create_unverified_context
+
+
+# requests — covers Gradio and any direct requests usage
+class _UnverifiedSession(requests.Session):
+    def __init__(self):
+        super().__init__()
+        self.verify = False
+
+
+requests.Session = _UnverifiedSession
+
+# httpx — covers huggingface_hub (which uses httpx internally, not requests)
+try:
+    import httpx
+
+    _orig_client = httpx.Client.__init__
+
+    def _patched_client(self, *args, **kwargs):
+        kwargs['verify'] = False
+        _orig_client(self, *args, **kwargs)
+
+    httpx.Client.__init__ = _patched_client
+
+    _orig_async_client = httpx.AsyncClient.__init__
+
+    def _patched_async_client(self, *args, **kwargs):
+        kwargs['verify'] = False
+        _orig_async_client(self, *args, **kwargs)
+
+    httpx.AsyncClient.__init__ = _patched_async_client
+except ImportError:
+    pass  # httpx not installed; HF Hub will install it transitively
+
+# huggingface_hub official hook — replaces the internal session factory so
+# every Hub request (HEAD, GET, download) uses an unverified session.
+try:
+    from huggingface_hub import configure_http_backend
+
+    def _unverified_backend() -> requests.Session:
+        session = requests.Session()
+        session.verify = False
+        return session
+
+    configure_http_backend(backend_factory=_unverified_backend)
+except Exception:
+    pass  # older huggingface_hub versions without configure_http_backend
+# ---------------------------------------------------------------------------
+
 import gradio as gr
 from pathlib import Path
 import json

@@ -15,36 +15,35 @@ setup_venv.bat
 
 **Linux/Mac:**
 ```bash
-python -m venv venv_dot_ocr
-source venv_dot_ocr/bin/activate
-pip install -r requirements.txt
+bash setup_venv.sh
 ```
 
-### Step 2: Start the DOTS vLLM server (local OCR model)
+### Step 2: DOTS model weights (one-time)
 
-Real extraction needs a **local** vLLM server running the DOTS OCR model. One-time setup:
+The DOTS model runs **in-process** via HuggingFace Transformers — no separate server needed.
 
-1. Clone and install DOTS OCR (if not already done):
+**Option A: Auto-download from HuggingFace Hub (default)**
 
-   ```bash
-   git clone https://github.com/rednote-hilab/dots.ocr.git
-   cd dots.ocr
-   pip install -e .
-   ```
+No action needed. The model downloads automatically on the first PDF upload. Requires internet access from jovyan.
 
-2. Download weights:
+**Option B: Pre-download weights locally (recommended for jovyan)**
 
-   ```bash
-   python3 tools/download_model.py
-   ```
+Avoids re-downloading on every fresh environment. Run once:
 
-3. Start the server (GPU with ~6GB+ VRAM):
+```bash
+git clone https://github.com/rednote-hilab/dots.ocr.git
+cd dots.ocr
+python3 tools/download_model.py
+# Weights go to ./weights/DotsOCR
+```
 
-   ```bash
-   CUDA_VISIBLE_DEVICES=0 vllm serve rednote-hilab/dots.ocr-1.5 --tensor-parallel-size 1 --gpu-memory-utilization 0.9 --chat-template-content-format string --served-model-name model --trust-remote-code
-   ```
+Then tell the app where to find them:
 
-   Leave this running. Default URL: `http://localhost:8000/v1`.
+```bash
+export DOTS_MODEL_PATH=./weights/DotsOCR
+```
+
+You can also set this in `launch.sh` or your shell profile.
 
 ### Step 3: Verify LLM API access (summary/classification)
 
@@ -56,12 +55,12 @@ The app uses the same remote LLM service as the main `pdf_extraction` app for su
 python test_pipeline.py
 ```
 
-Expected output (vLLM server must be running for full extraction):
+Expected output:
 ```
 ✅ All modules imported successfully
 ✅ Config loaded successfully
 ✅ Device detection working
-✅ DotsExtractor initialized (vLLM at http://localhost:8000/v1, device: cuda/cpu)
+✅ DotsExtractor initialized (model=rednote-hilab/dots.ocr, device: cuda/cpu)
 ✅ PromptBridge initialized
 ✅ LLM client initialized
 ```
@@ -69,10 +68,14 @@ Expected output (vLLM server must be running for full extraction):
 ### Step 5: Run the Gradio UI
 
 ```bash
+bash launch.sh
+# or manually:
 python gradio_app.py
 ```
 
 Open browser to: `http://localhost:7862`
+
+The DOTS model loads into GPU memory on the **first PDF upload** (one-time, ~30–60s).
 
 ### Step 6: Upload and process a PDF
 
@@ -97,51 +100,62 @@ For `sample.pdf`, you'll get:
 - `output/sample_prompt.txt` - Prompt sent to LLM service
 - `output/sample_result.json` - Final summary + classification
 
+Debug mode also creates `debug_output/sample_TIMESTAMP/`:
+- `page_N_image.png` - Rasterized page images
+- `page_N_model_response.txt` - Raw model output per page
+- `page_N_model_parsed.json` - Parsed JSON per page
+- `prompt_sent_to_llm.txt` - Prompt sent to Ollama
+- `extraction_raw.json` / `extraction_normalized.json`
+
 ## GPU Usage
 
 The app auto-detects and uses GPU when available:
 
-Check if GPU is detected:
 ```python
 import torch
 print(torch.cuda.is_available())  # Should be True
 ```
 
-GPU will be shown in the UI under "Device & Runtime Info"
+GPU will be shown in the UI under "Device & Runtime Info".
+
+For faster inference with flash attention (optional):
+```bash
+pip install flash-attn --no-build-isolation
+export DOTS_ATTN_IMPLEMENTATION=flash_attention_2
+```
 
 ## Troubleshooting
 
-**vLLM connection refused (extraction fails):**
-- Start the DOTS vLLM server (Step 2). Ensure it is listening at `http://localhost:8000/v1`.
-- Check `config.py`: `VLLM_HOST`, `VLLM_PORT`.
+**Model download fails / "Repository not found":**
+- Check internet access from jovyan to `huggingface.co`
+- Use Option B (pre-download) and set `DOTS_MODEL_PATH` to the local path
+
+**"CUDA not available" / model runs on CPU:**
+- App falls back to CPU automatically (slower but functional)
+- Check: `python -c "import torch; print(torch.cuda.is_available())"`
+
+**Out of GPU memory (OOM) during model load or inference:**
+- Use "fast" preset (lower DPI, page cap 1)
+- Reduce `DOTS_MAX_NEW_TOKENS` in `config.py`
+- Ensure no other large models are loaded on the GPU
 
 **"LLM API request failed" (summary/classification):**
 - Check network access to the remote LLM service
 - Verify `API_URL` / `API_KEY` in `call_llama_api.py`
 - Set `LLAMA_API_KEY` env var if the key has rotated
 
-**"CUDA not available"**
-- App will fallback to CPU automatically
-- Check: `python -c "import torch; print(torch.cuda.is_available())"`
-
-**"ModuleNotFoundError"**
-- Activate venv: `venv_dot_ocr\Scripts\activate`
+**"ModuleNotFoundError":**
+- Activate venv: `source venv_dot_ocr/bin/activate`
 - Install: `pip install -r requirements.txt`
-
-## Next Steps
-
-- Edit `config.py` to customize defaults (e.g. `VLLM_HOST`, `VLLM_PORT`, `PAGE_CAP`, `DPI`)
-- Add your own classification labels
-- Run vLLM on another machine and set `VLLM_HOST` to that host
 
 ## Performance Tips
 
-**Fast processing (1-2 seconds per page):**
+**Fast processing (higher latency on first load, then per-page):**
 - Preset: "fast"
 - Page cap: 1
 - DPI: 150
 
-**High quality (5-10 seconds per page):**
+**High quality:**
 - Preset: "high_quality"
 - Page cap: 5
 - DPI: 300
@@ -149,4 +163,4 @@ GPU will be shown in the UI under "Device & Runtime Info"
 **GPU memory issues:**
 - Use "fast" preset
 - Reduce page cap to 1
-- Switch to CPU mode
+- Switch to CPU mode (slow but safe)

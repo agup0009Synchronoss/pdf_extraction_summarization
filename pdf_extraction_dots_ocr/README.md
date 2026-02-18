@@ -7,7 +7,7 @@ LLM summarization via the same remote service used by the main `pdf_extraction` 
 
 This application is fully isolated from the main `pdf_extraction` app and follows a clean pipeline:
 
-1. **DOTS Extraction** - Extract OCR/layout from scanned PDF pages via local vLLM server (rednote-hilab/dots.ocr-1.5)
+1. **DOTS Extraction** - Extract OCR/layout from scanned PDF pages using HuggingFace Transformers (in-process, no server)
 2. **Normalization** - Convert raw DOTS output to stable schema with lenient parsing
 3. **Prompt Bridge** - Transform normalized extraction into a custom LLM prompt
 4. **LLM Inference** - Generate summary and classification via remote service (fail-fast, no fallback)
@@ -15,17 +15,17 @@ This application is fully isolated from the main `pdf_extraction` app and follow
 
 ## Quick start (Linux / jovyan)
 
-One command starts the vLLM server and Gradio app together:
+One command starts the Gradio app. The DOTS model loads in-process on the first PDF upload.
 
 ```bash
 cd pdf_extraction_dots_ocr
-bash setup_venv.sh   # first time only
+bash setup_venv.sh          # first time only
 bash launch.sh
 ```
 
-Then open `http://localhost:7862`. The launcher starts the DOTS vLLM server, waits for it to be healthy, then runs the Gradio UI. On exit (Ctrl+C), it stops the vLLM server.
+Then open `http://localhost:7862`.
 
-Optional env vars: `VLLM_PORT` (default 8000), `VLLM_MODEL` (default `rednote-hilab/dots.ocr-1.5`), `GRADIO_PORT` (default 7862), `VLLM_HOST` (default localhost).
+Optional env vars: `DOTS_MODEL_PATH` (default `rednote-hilab/dots.ocr`), `GRADIO_PORT` (default 7862).
 
 ## Setup
 
@@ -63,24 +63,38 @@ source venv_dot_ocr/bin/activate
 pip install -r requirements.txt
 ```
 
-### 4. Local vLLM server (DOTS OCR model)
+### 4. DOTS model (HuggingFace Transformers — in-process)
 
-The extractor calls a **local** vLLM server that serves the DOTS OCR vision model. No data is sent to OpenAI.
+The extractor loads `rednote-hilab/dots.ocr` directly in-process via Transformers. No separate server is needed.
 
-**On Linux:** use `bash launch.sh` — it starts vLLM and Gradio in one hit (see Quick start).
+**Option A: Auto-download from HuggingFace Hub (default)**
 
-**Manual start (e.g. for debugging):** Start the vLLM server (requires a GPU with ~6GB+ VRAM):
+No action needed. The model downloads on the first PDF upload. Requires internet from jovyan.
+
+**Option B: Pre-download weights locally (recommended for jovyan)**
 
 ```bash
-vllm serve rednote-hilab/dots.ocr-1.5 \
-  --served-model-name model \
-  --port 8000 \
-  --trust-remote-code \
-  --dtype bfloat16 \
-  --gpu-memory-utilization 0.85
+git clone https://github.com/rednote-hilab/dots.ocr.git
+cd dots.ocr
+python3 tools/download_model.py
+# Weights go to ./weights/DotsOCR (directory name without periods is required)
 ```
 
-The server listens at `http://localhost:8000/v1` by default. Override with `VLLM_HOST` and `VLLM_PORT` (see `config.py`; both read from the environment).
+Point the app to your weights:
+```bash
+export DOTS_MODEL_PATH=./weights/DotsOCR
+```
+
+Or set it permanently in `launch.sh`.
+
+**Optional: faster inference with flash attention**
+
+```bash
+pip install flash-attn --no-build-isolation
+export DOTS_ATTN_IMPLEMENTATION=flash_attention_2
+```
+
+Without `flash-attn`, the app uses `sdpa` (PyTorch's built-in, safe default).
 
 ### 5. LLM API access (summary/classification)
 
@@ -91,17 +105,11 @@ To update the key or endpoint, edit `call_llama_api.py` (or set the `LLAMA_API_K
 
 ## Usage
 
-### Run Gradio UI (Linux: one command for vLLM + UI)
-
-**Linux (recommended):** starts vLLM then Gradio:
+### Run Gradio UI
 
 ```bash
 bash launch.sh
-```
-
-**Manual (vLLM already running):**
-
-```bash
+# or manually (after activating venv):
 python gradio_app.py
 ```
 
@@ -127,29 +135,42 @@ config_overrides = {
     "PAGE_CAP": 5,
     "DPI": 300,
     "DEVICE_POLICY": "gpu",
-    "PERFORMANCE_PRESET": "high_quality"
+    "PERFORMANCE_PRESET": "high_quality",
+    "DOTS_MODEL_PATH": "./weights/DotsOCR",
 }
 
 result = run_pipeline(pdf_path, config_overrides)
 ```
 
+Key config fields:
+
+| Field | Default | Description |
+|---|---|---|
+| `DOTS_MODEL_PATH` | `rednote-hilab/dots.ocr` | HF Hub ID or local path to model weights |
+| `DOTS_MAX_NEW_TOKENS` | `24000` | Max tokens for model.generate() |
+| `DOTS_ATTN_IMPLEMENTATION` | `sdpa` | Attention backend; use `flash_attention_2` with flash-attn installed |
+| `PAGE_CAP` | `2` | Max pages to process per PDF |
+| `DPI` | `200` | PDF rasterization resolution |
+| `DEVICE_POLICY` | `auto` | `auto`, `gpu`, or `cpu` |
+
 ## Key Features
 
+- **In-process inference**: DOTS model runs directly in Python via Transformers — no external server required
 - **GPU Auto-Detection**: Automatically uses GPU when available, with CPU fallback
 - **Page Cap Control**: Limit pages processed for cost/latency management (default: 2 pages)
 - **Quality Presets**: Fast, balanced, high_quality presets adjust DPI and page caps
 - **Lenient Parsing**: Handles DOTS response format drift with warnings
 - **Full Artifact Persistence**: Saves raw, normalized, prompt, and response for every run
 - **Fail-Fast**: Clear error messages, no silent fallbacks on critical paths
-- **Debug Mode (default on)**: Per-run timestamped folder under `debug_output/` with page images, vLLM responses, and prompt for easier debugging
+- **Debug Mode (default on)**: Per-run timestamped folder under `debug_output/` with page images, model responses, and prompt for easier debugging
 
 ## Debug mode
 
 When `DEBUG_SAVE_ARTIFACTS` is true (default), each run creates a folder `debug_output/{filename}_{timestamp}/` containing:
 
-- `page_1_image.png`, `page_2_image.png`, ... — rasterized page images sent to vLLM
-- `page_1_vllm_response.txt`, ... — raw vLLM response text per page
-- `page_1_vllm_parsed.json`, ... — parsed layout/OCR JSON per page
+- `page_1_image.png`, `page_2_image.png`, ... — rasterized page images sent to the model
+- `page_1_model_response.txt`, ... — raw model response text per page
+- `page_1_model_parsed.json`, ... — parsed layout/OCR JSON per page
 - `prompt_sent_to_llm.txt` — the prompt built from extraction and sent to the summary/classification LLM
 - `extraction_raw.json` — full raw extraction
 - `extraction_normalized.json` — normalized extraction
@@ -190,7 +211,7 @@ DOTS-specific labels:
 
 ## Backend Status
 
-**Current**: Real DOTS OCR extraction via local vLLM server. PDF pages are rasterized with PyMuPDF, resized to model-friendly bounds, and sent to the local vLLM endpoint; the response is parsed and normalized for the prompt bridge. Summary and classification still use the remote LLM cron-job service (`call_llama_api.py`).
+**Current**: Real DOTS OCR extraction via HuggingFace Transformers (in-process). PDF pages are rasterized with PyMuPDF, resized to model-friendly bounds, and fed directly to `model.generate()` using the Transformers library. The response is parsed and normalized for the prompt bridge. Summary and classification use the remote LLM cron-job service (`call_llama_api.py`).
 
 ## Differences from Main App
 
@@ -209,18 +230,21 @@ This DOTS OCR app differs from the main `pdf_extraction` app:
 - Check CUDA installation: `python -c "import torch; print(torch.cuda.is_available())"`
 - Verify PyTorch CUDA build: `python -c "import torch; print(torch.version.cuda)"`
 
+**Out of GPU memory (OOM):**
+- Reduce DPI or use "fast" preset
+- Reduce page cap
+- Switch to CPU mode if GPU memory insufficient
+
+**Model download fails / repository not found:**
+- Check internet access to `huggingface.co` from jovyan
+- Use local weights (Option B in Setup Step 4) and set `DOTS_MODEL_PATH`
+
 **"LLM API request failed" / connection error:**
 - Check network access to the remote LLM service
 - Verify `API_URL` and `API_KEY` in `call_llama_api.py`
 - Set the `LLAMA_API_KEY` environment variable if the key has rotated
 
-**Out of memory (OOM):**
-- Reduce DPI or use "fast" preset
-- Reduce page cap
-- Switch to CPU mode if GPU memory insufficient
-
-**vLLM connection failed / "Connection refused" to localhost:8000:**
-- On Linux, use `bash launch.sh` so the vLLM server is started automatically before Gradio.
-- Otherwise ensure the DOTS vLLM server is running (see "Local vLLM server" in Setup).
-- Override via environment: `VLLM_HOST`, `VLLM_PORT` (see `config.py`).
-- If the server runs on another machine, set `VLLM_HOST` and ensure the port is reachable.
+**Empty extraction JSON (extraction_raw.json / extraction_normalized.json):**
+- Check the `page_N_model_response.txt` files in the debug folder to see raw model output
+- If they are empty, model inference failed — check terminal logs for errors
+- GPU OOM is a common cause; try the "fast" preset or CPU mode

@@ -6,12 +6,15 @@ torch>=2.0.0
 gradio>=4.0.0
 requests>=2.31.0
 
-# PDF rasterization and image handling (real DOTS extraction)
+# PDF rasterization and image handling
 PyMuPDF>=1.23.0
 Pillow>=10.0.0
 
-# Local vLLM client (OpenAI-compatible API to local DOTS server)
-openai>=1.0.0
+# HuggingFace Transformers (in-process DOTS OCR inference)
+transformers>=4.45.0
+accelerate>=0.30.0
+qwen-vl-utils>=0.0.8
 
-# vLLM server (for launch.sh on Linux/jovyan; runs in same venv)
-vllm
+# Optional: install flash-attn separately for faster GPU inference
+# pip install flash-attn --no-build-isolation
+# Then set: export DOTS_ATTN_IMPLEMENTATION=flash_attention_2
