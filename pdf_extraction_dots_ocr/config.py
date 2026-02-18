@@ -34,10 +34,13 @@ class DotsConfig:
     PERFORMANCE_PRESET: str = "balanced"  # Options: "fast", "balanced", "high_quality"
 
     # DOTS model (HuggingFace Transformers in-process)
-    # Set DOTS_MODEL_PATH env var to a local weights dir (e.g. ./weights/DotsOCR) to avoid re-downloads.
-    DOTS_MODEL_PATH: str = field(default_factory=lambda: os.environ.get("DOTS_MODEL_PATH", "rednote-hilab/dots.ocr"))
+    # dots.ocr-1.5 is the latest model (released 2026-02-16), with improved accuracy across all benchmarks.
+    # Set DOTS_MODEL_PATH env var to a local weights dir (e.g. ./weights/DotsOCR_1_5) to avoid re-downloads.
+    DOTS_MODEL_PATH: str = field(default_factory=lambda: os.environ.get("DOTS_MODEL_PATH", "rednote-hilab/dots.ocr-1.5"))
     DOTS_MAX_NEW_TOKENS: int = 24000
-    # Use "sdpa" if flash_attn is not installed; "flash_attention_2" requires the flash-attn package.
+    # "sdpa" is the safe default (works without flash-attn).
+    # Set env var DOTS_ATTN_IMPLEMENTATION=flash_attention_2 after installing flash-attn for faster inference:
+    #   pip install flash-attn --no-build-isolation
     DOTS_ATTN_IMPLEMENTATION: str = field(
         default_factory=lambda: os.environ.get("DOTS_ATTN_IMPLEMENTATION", "sdpa")
     )

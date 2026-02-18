@@ -130,14 +130,14 @@ class DotsExtractor:
         self._model = AutoModelForCausalLM.from_pretrained(
             self.config.DOTS_MODEL_PATH,
             attn_implementation=self.config.DOTS_ATTN_IMPLEMENTATION,
-            torch_dtype=torch.bfloat16,
+            dtype=torch.bfloat16,
             device_map="auto",
             trust_remote_code=True,
         )
         self._processor = AutoProcessor.from_pretrained(
             self.config.DOTS_MODEL_PATH,
             trust_remote_code=True,
-            use_fast=False,
+            use_fast=True,
         )
         log.info("DOTS model loaded successfully (device: %s)", self.effective_device)
 

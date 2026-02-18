@@ -1,20 +1,35 @@
 # DOTS OCR Application Requirements
 # ==================================
+# Based on official dots.ocr requirements:
+# https://github.com/rednote-hilab/dots.ocr/blob/master/requirements.txt
 
-# Core dependencies
+# Core ML stack — versions match the official dots.ocr repo
 torch>=2.0.0
-gradio>=4.0.0
-requests>=2.31.0
+transformers==4.56.1
+accelerate>=0.30.0
+
+# HuggingFace model utilities
+huggingface_hub>=0.25.0
+qwen-vl-utils>=0.0.8
 
 # PDF rasterization and image handling
 PyMuPDF>=1.23.0
 Pillow>=10.0.0
 
-# HuggingFace Transformers (in-process DOTS OCR inference)
-transformers>=4.45.0
-accelerate>=0.30.0
-qwen-vl-utils>=0.0.8
+# Web UI
+gradio>=4.0.0
 
-# Optional: install flash-attn separately for faster GPU inference
-# pip install flash-attn --no-build-isolation
-# Then set: export DOTS_ATTN_IMPLEMENTATION=flash_attention_2
+# HTTP
+requests>=2.31.0
+
+# Flash Attention 2 — optional, speeds up GPU inference significantly.
+# Cannot be installed via plain `pip install` due to CUDA compilation requirements.
+# Install manually after the above packages:
+#
+#   pip install flash-attn --no-build-isolation
+#
+# Then activate it by setting the env var before launching:
+#   export DOTS_ATTN_IMPLEMENTATION=flash_attention_2
+#
+# Official reference: https://github.com/rednote-hilab/dots.ocr
+# flash-attn==2.8.0.post2
