@@ -5,6 +5,7 @@
 
 # Core ML stack — versions match the official dots.ocr repo
 torch>=2.0.0
+torchvision>=0.15.0
 transformers==4.56.1
 accelerate>=0.30.0
 
