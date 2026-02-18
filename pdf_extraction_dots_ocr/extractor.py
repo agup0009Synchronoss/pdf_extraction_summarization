@@ -120,22 +120,61 @@ class DotsExtractor:
             self.effective_device,
         )
 
+    def _resolve_model_path(self) -> str:
+        """
+        Resolve the model path to use for loading.
+
+        transformers>=4.49 derives a Python module name from the HF repo ID when
+        trust_remote_code=True.  A dot in the repo name (e.g. 'dots.ocr') makes
+        Python treat it as a sub-package import and raises:
+            ModuleNotFoundError: No module named 'transformers_modules.rednote-hilab.dots'
+
+        The official dots.ocr docs note: "use a directory name without periods".
+        Fix: if the HF model ID contains a dot, snapshot-download it once to a
+        safe local directory (dots replaced with underscores) and load from there.
+        """
+        model_path = self.config.DOTS_MODEL_PATH
+
+        # Already a local path — use as-is.
+        if Path(model_path).exists():
+            return model_path
+
+        # HF repo ID with a dot in the model name → needs local download.
+        if "/" in model_path:
+            model_name = model_path.split("/", 1)[1]
+            if "." in model_name:
+                safe_name = model_name.replace(".", "_")
+                local_dir = Path("./hf_cache") / safe_name
+                if (local_dir / "config.json").exists():
+                    log.info("Using cached local model at: %s", local_dir)
+                    return str(local_dir)
+                log.info(
+                    "Downloading %s to local path %s (avoids dots-in-module-name error)...",
+                    model_path, local_dir,
+                )
+                from huggingface_hub import snapshot_download
+                snapshot_download(model_path, local_dir=str(local_dir))
+                return str(local_dir)
+
+        return model_path
+
     def _load_model(self):
         """Lazy-load model and processor on first call to avoid GPU memory at import time."""
         if self._model is not None:
             return
         from transformers import AutoModelForCausalLM, AutoProcessor
 
-        log.info("Loading DOTS model from %s ...", self.config.DOTS_MODEL_PATH)
+        resolved_path = self._resolve_model_path()
+        log.info("Loading DOTS model from %s ...", resolved_path)
         self._model = AutoModelForCausalLM.from_pretrained(
-            self.config.DOTS_MODEL_PATH,
+            resolved_path,
             attn_implementation=self.config.DOTS_ATTN_IMPLEMENTATION,
             dtype=torch.bfloat16,
             device_map="auto",
             trust_remote_code=True,
         )
         self._processor = AutoProcessor.from_pretrained(
-            self.config.DOTS_MODEL_PATH,
+            resolved_path,
             trust_remote_code=True,
             use_fast=True,
         )
