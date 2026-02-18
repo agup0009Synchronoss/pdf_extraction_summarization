@@ -137,6 +137,7 @@ class DotsExtractor:
         self._processor = AutoProcessor.from_pretrained(
             self.config.DOTS_MODEL_PATH,
             trust_remote_code=True,
+            use_fast=False,
         )
         log.info("DOTS model loaded successfully (device: %s)", self.effective_device)
 
