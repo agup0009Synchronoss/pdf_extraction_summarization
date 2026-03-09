@@ -233,3 +233,10 @@ experiments/
 *.tar.gz
 *.rar
 *.7z
+
+# ==============================================================================
+# Granite-Docling POC
+# ==============================================================================
+venv_granite/
+pdf_extraction_granite/out/
+pdf_extraction_granite/output/

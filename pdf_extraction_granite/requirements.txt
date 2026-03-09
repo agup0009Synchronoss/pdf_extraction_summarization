@@ -1,0 +1,32 @@
+# Granite-Docling PDF Extraction POC
+# ====================================
+# Core document extraction (includes VLM pipeline extras)
+docling[vlm]==2.74.0
+
+# Core ML stack — versions must match docling[vlm]'s transitive deps.
+# Mismatched torch/transformers versions cause silent Granite-Docling load failures.
+torch==2.10.0
+torchvision==0.25.0
+transformers==4.57.6
+accelerate==1.12.0
+
+# HuggingFace model hub (model weights are downloaded on first run)
+huggingface_hub==0.36.2
+
+# Web UI
+gradio==6.6.0
+
+# HTTP / networking
+requests==2.32.5
+httpx==0.28.1
+
+# Flash Attention 2 — optional, speeds up GPU inference significantly.
+# Cannot be installed via plain `pip install` due to CUDA compilation requirements.
+# Install manually after the above packages:
+#
+#   pip install flash-attn --no-build-isolation
+#
+# Then activate it by setting the env var before launching:
+#   export DOCS_ATTN_IMPLEMENTATION=flash_attention_2
+#
+# flash-attn  (version varies by CUDA version)

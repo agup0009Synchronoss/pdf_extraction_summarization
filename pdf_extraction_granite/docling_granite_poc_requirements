@@ -1,0 +1,109 @@
+Build a minimal but clean Python POC for the following pipeline:
+
+Upload PDF
+→ Docling convert using Granite-Docling VLM pipeline
+→ produce DoclingDocument
+→ export JSON and Markdown
+→ build an LLM-ready prompt from the extracted output
+→ call an existing Ollama-compatible API wrapper in `call_llama_api.py`
+→ generate a 2–4 line summary of the uploaded document/task
+
+Goals:
+1. Create a very small local POC, not a production system.
+2. Use Gradio for the UI.
+3. The app must let me upload a PDF and then visually inspect:
+   - extracted Markdown
+   - extracted structured JSON
+   - the exact prompt sent to the LLM
+   - the final 2–4 line summary returned by the model
+4. Use Docling with the Granite-Docling VLM pipeline for PDF conversion.
+5. Reuse the existing `call_llama_api.py` file for the LLM call instead of creating a new API client from scratch.
+
+Important implementation requirements:
+- First inspect `call_llama_api.py` and understand:
+  - how payloads are built
+  - what function(s) already exist
+  - how the API URL, model name, and auth are handled
+  - how a request is sent
+  - what response shape is returned
+- Reuse that implementation as much as possible.
+- Do not duplicate wrapper logic unless absolutely necessary.
+- If `call_llama_api.py` is slightly incomplete, minimally adapt it so it can be called from the Gradio app cleanly.
+- Keep all changes small and readable.
+
+App behavior:
+- User uploads a PDF.
+- The app runs Docling conversion with Granite-Docling.
+- It extracts:
+  - Markdown output
+  - structured JSON output
+- Then create an LLM prompt using the extracted content.
+- Then send that prompt to the Ollama-compatible model through `call_llama_api.py`.
+- The LLM must return a concise 2–4 line summary of the uploaded document.
+- Show all outputs in the UI.
+
+Prompt-building rules:
+- The summarization prompt should be robust but simple.
+- It should instruct the model to:
+  - summarize the document in 2–4 lines
+  - focus on the main purpose, topic, and most important points
+  - avoid hallucinating missing facts
+  - state uncertainty when the extraction is noisy or incomplete
+- Prefer using a structured prompt that includes:
+  - document metadata if available
+  - extracted headings/sections if available
+  - extracted markdown/text body
+- Truncate overly large extracted content to a reasonable size before sending to the LLM.
+- Make truncation explicit in code.
+
+Engineering requirements:
+- Python only.
+- Use Gradio.
+- Use venv_granite
+- Keep the project minimal.
+- Organize the code cleanly.
+- Add comments only where useful.
+- Include basic error handling for:
+  - invalid PDF
+  - Docling conversion failure
+  - LLM request failure
+  - empty extraction result
+- Avoid overengineering.
+- No database.
+- No background workers.
+- No auth system.
+- No vector DB.
+- No async complexity unless truly needed.
+
+Deliverables:
+1. A main Gradio app file.
+2. Any small helper functions needed for:
+   - Docling conversion
+   - JSON/Markdown export
+   - prompt building
+   - LLM summarization
+3. Minimal dependency list.
+4. Clear run instructions.
+5. A short explanation of the flow.
+
+Implementation hints:
+- Treat Docling JSON as the structured source of truth.
+- Markdown is mainly for preview/debugging.
+- Build the LLM prompt from the extracted content, not directly from the raw PDF.
+- Make the UI practical for debugging:
+  - PDF filename
+  - markdown preview
+  - JSON preview
+  - final LLM prompt preview
+  - summary output
+
+Expected output from you:
+- First, inspect and summarize `call_llama_api.py` and explain how you will integrate with it.
+- Then generate the code.
+- Then explain exactly how to run it.
+
+Keep the POC lean and functional.
+
+
+
+Note - We already have some parts of this project running under so guage what is already there - I think most of it is there and running- pdf_extraction_granite - compare that against pdf_extraction_dots_ocr, pdf_extraction folder which are other exactly same POCS but with other models wrapped under very similar gradio apps so that for POC comparison UI look similar. Learn from them how we generate the prompt that we send to ollama LLM and try following similar norms. 
