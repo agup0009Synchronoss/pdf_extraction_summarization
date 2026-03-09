@@ -31,6 +31,10 @@ os.environ['SSL_CERT_FILE'] = ''
 os.environ['HF_HUB_DISABLE_SSL_VERIFICATION'] = '1'
 os.environ['HF_HOME'] = './hf_cache'
 os.environ['HF_HUB_DISABLE_SYMLINKS_WARNING'] = '1'
+# Disable HuggingFace XET (Rust-level large-file downloader) — it ignores
+# Python SSL patches and panics on corporate networks with SSL inspection.
+# Falling back to regular Python HTTPS which our patches above already cover.
+os.environ['HF_HUB_DISABLE_XET'] = '1'
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 warnings.filterwarnings('ignore', message='Unverified HTTPS request')
